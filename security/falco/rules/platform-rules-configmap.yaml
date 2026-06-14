@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: falco-platform-rules
+  namespace: security
+data:
+  platform_rules.yaml: |
+    - rule: Shell In Container
+      desc: Detect shell execution inside application containers
+      condition: evt.type = execve and (proc.name in (bash, sh, zsh, csh, tcsh, ksh))
+      output: Shell executed in container (user=%user.name container=%container.name image=%container.image.repository)
+      priority: WARNING
+      tags: [container, security]

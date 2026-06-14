@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: platform-remediation
+  namespace: platform
+  labels:
+    app.kubernetes.io/name: platform-remediation
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: platform-remediation
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: platform-remediation
+    spec:
+      containers:
+        - name: webhook
+          image: hashicorp/http-echo:1.0.0
+          args: ["-text=remediation-accepted", "-listen=:5678"]
+          ports:
+            - containerPort: 5678
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: platform-remediation
+  namespace: platform
+spec:
+  selector:
+    app.kubernetes.io/name: platform-remediation
+  ports:
+    - name: http
+      port: 80
+      targetPort: 5678
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: platform-autoscale-observer
+  namespace: platform
+  labels:
+    app.kubernetes.io/name: platform-autoscale-observer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: platform-autoscale-observer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: platform-autoscale-observer
+    spec:
+      containers:
+        - name: webhook
+          image: hashicorp/http-echo:1.0.0
+          args: ["-text=autoscale-observed", "-listen=:5678"]
+          ports:
+            - containerPort: 5678
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: platform-autoscale-observer
+  namespace: platform
+spec:
+  selector:
+    app.kubernetes.io/name: platform-autoscale-observer
+  ports:
+    - name: http
+      port: 80
+      targetPort: 5678

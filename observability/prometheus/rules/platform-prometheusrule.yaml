@@ -1,0 +1,27 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: platform-control-loop-alerts
+  namespace: observability
+spec:
+  groups:
+    - name: platform-alerts
+      rules:
+        - alert: NodeNotReady
+          expr: kube_node_status_condition{condition="Ready",status="true"} == 0
+          for: 5m
+          labels:
+            severity: critical
+            reaction: remediation
+          annotations:
+            summary: Node is not ready
+            action: trigger-node-remediation
+        - alert: PlatformSimulatorHighCPU
+          expr: avg(rate(container_cpu_usage_seconds_total{namespace="platform",pod=~"app-prod-platform-simulator.*"}[5m])) > 0.25
+          for: 3m
+          labels:
+            severity: warning
+            reaction: autoscale
+          annotations:
+            summary: Platform simulator CPU load is elevated
+            action: verify-hpa-reconciliation

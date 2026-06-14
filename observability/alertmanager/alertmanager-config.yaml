@@ -1,0 +1,27 @@
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: AlertmanagerConfig
+metadata:
+  name: platform-reaction-routing
+  namespace: observability
+spec:
+  route:
+    receiver: default
+    routes:
+      - receiver: remediation-webhook
+        matchers:
+          - name: reaction
+            value: remediation
+            matchType: "="
+      - receiver: autoscale-observer
+        matchers:
+          - name: reaction
+            value: autoscale
+            matchType: "="
+  receivers:
+    - name: default
+    - name: remediation-webhook
+      webhookConfigs:
+        - url: http://platform-remediation.platform.svc.cluster.local/hook
+    - name: autoscale-observer
+      webhookConfigs:
+        - url: http://platform-autoscale-observer.platform.svc.cluster.local/hook

@@ -1,0 +1,18 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-applications
+  namespace: argocd
+spec:
+  project: platform
+  source:
+    repoURL: https://example.com/enterprise-secure-infrastructure-platform.git
+    targetRevision: main
+    path: kubernetes/apps/overlays/prod
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: platform
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

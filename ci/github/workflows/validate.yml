@@ -1,0 +1,16 @@
+name: validate
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  scaffold:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate files exist
+        run: |
+          test -f README.md
+          test -f terraform/main.tf
+          test -f kubernetes/base/namespace.yaml

@@ -1,0 +1,9 @@
+project_name       = "enterprise-platform"
+environment        = "local"
+runtime            = "docker"
+simulation_mode    = true
+network_cidr       = "10.10.0.0/16"
+service_cidr       = "10.96.0.0/12"
+minikube_profiles  = ["dev", "staging", "prod"]
+isolation_strategy = "profiles"
+platform_namespace = "platform"

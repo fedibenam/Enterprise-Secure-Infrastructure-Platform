@@ -1,0 +1,10 @@
+groups:
+  - name: platform-alerts
+    rules:
+      - alert: NodeNotReady
+        expr: kube_node_status_condition{condition="Ready",status="true"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Node is not ready

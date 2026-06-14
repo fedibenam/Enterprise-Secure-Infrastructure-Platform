@@ -1,0 +1,24 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+
+# Kubernetes and GitOps
+*.secret.yaml
+*.sealed.yaml
+
+# Editors and OS
+.vscode/*.log
+.idea/
+Thumbs.db
+Desktop.ini
+
+# Build and test artifacts
+dist/
+build/
+coverage/
+
+# Local env files
+.env
+.env.*

@@ -1,0 +1,31 @@
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8strustedregistries
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sTrustedRegistries
+      validation:
+        openAPIV3Schema:
+          properties:
+            allowedPrefixes:
+              type: array
+              items:
+                type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8strustedregistries
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.template.spec.containers[_]
+          not startswith_any(container.image, input.parameters.allowedPrefixes)
+          msg := sprintf("Image registry not allowed: %v", [container.image])
+        }
+
+        startswith_any(image, prefixes) {
+          prefix := prefixes[_]
+          startswith(image, prefix)
+        }

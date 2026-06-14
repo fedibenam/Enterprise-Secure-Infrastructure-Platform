@@ -1,0 +1,6 @@
+{
+  "files.eol": "\r\n",
+  "editor.formatOnSave": true,
+  "yaml.validate": true,
+  "terraform.languageServer.enable": true
+}

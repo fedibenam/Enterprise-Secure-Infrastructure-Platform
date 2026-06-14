@@ -1,0 +1,14 @@
+name: deploy
+
+on:
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Confirm deployment manifests exist
+        run: |
+          test -f gitops/argocd/app-of-apps.yaml
+          test -f gitops/argocd/project.yaml

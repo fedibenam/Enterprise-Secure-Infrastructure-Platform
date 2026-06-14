@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: platform-control-loop-model
+  namespace: platform
+data:
+  desired_state_source: git
+  reconciliation_engines: "flux(infrastructure),argocd(applications)"
+  enforcement_layer: gatekeeper-opa
+  feedback_signals: "prometheus,loki,opentelemetry,falco"
+  reaction_layers: "hpa,rollout-health-remediation,gitops-self-heal"

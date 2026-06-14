@@ -1,0 +1,15 @@
+name: security
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check policy files exist
+        run: |
+          test -f policy/opa/deny_public_db.rego
+          test -f security/falco/rules/platform_rules.yaml

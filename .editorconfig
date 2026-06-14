@@ -1,0 +1,15 @@
+root = true
+
+[*.{md,yaml,yml,tf,ps1,json}]
+charset = utf-8
+end_of_line = crlf
+insert_final_newline = true
+indent_style = space
+indent_size = 2
+
+[*.ps1]
+indent_style = space
+indent_size = 4
+
+[Makefile]
+indent_style = tab

@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pod-security-baseline
+  namespace: platform
+data:
+  policy: "baseline"
