@@ -1,39 +1,48 @@
 apiVersion: constraints.gatekeeper.sh/v1beta1
-kind: K8sRequiredLabels
-metadata:
-  name: require-platform-app-label
-spec:
-  match:
-    kinds:
-      - apiGroups: [""]
-        kinds: ["Pod"]
-      - apiGroups: ["apps"]
-        kinds: ["Deployment", "StatefulSet", "DaemonSet"]
-  enforcementAction: deny
----
-apiVersion: constraints.gatekeeper.sh/v1beta1
 kind: K8sDisallowPrivileged
 metadata:
   name: disallow-privileged-containers
 spec:
+  enforcementAction: deny
   match:
     kinds:
       - apiGroups: ["apps"]
         kinds: ["Deployment", "StatefulSet", "DaemonSet"]
-  enforcementAction: deny
+    namespaces:
+      - platform
 ---
 apiVersion: constraints.gatekeeper.sh/v1beta1
 kind: K8sTrustedRegistries
 metadata:
   name: enforce-trusted-registries
 spec:
+  enforcementAction: deny
   match:
     kinds:
       - apiGroups: ["apps"]
         kinds: ["Deployment", "StatefulSet", "DaemonSet"]
+    namespaces:
+      - platform
   parameters:
     allowedPrefixes:
-      - docker.io/
-      - ghcr.io/
-      - registry.k8s.io/
+      - "docker.io/"
+      - "ghcr.io/"
+      - "registry.k8s.io/"
+      - "quay.io/"
+      - "gcr.io/"
+      - "public.ecr.aws/"
+      - "openpolicyagent/"
+      - "nginx:"
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequiredLabels
+metadata:
+  name: require-platform-app-label
+spec:
   enforcementAction: deny
+  match:
+    kinds:
+      - apiGroups: ["apps"]
+        kinds: ["Deployment"]
+    namespaces:
+      - platform

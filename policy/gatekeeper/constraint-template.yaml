@@ -7,12 +7,15 @@ spec:
     spec:
       names:
         kind: K8sRequiredLabels
+      validation:
+        openAPIV3Schema:
+          type: object
   targets:
     - target: admission.k8s.gatekeeper.sh
       rego: |
         package k8srequiredlabels
 
-        violation["message"] {
+        violation[{"msg": msg}] {
           not input.review.object.metadata.labels["app.kubernetes.io/name"]
-          message := "Missing required app label"
+          msg := "Missing required app.kubernetes.io/name label"
         }
