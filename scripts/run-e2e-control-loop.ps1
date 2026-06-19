@@ -31,6 +31,7 @@ $context = $PrimaryProfile
 . $PSScriptRoot\e2e\04-Test-Observability.ps1
 . $PSScriptRoot\e2e\05-Test-Reaction.ps1
 . $PSScriptRoot\e2e\06-Test-Tracing.ps1  
+. $PSScriptRoot\e2e\07-Test-Cilium.ps1   # <-- ADD THIS LINE
 
 # 4. Final Summary
 Write-Host "`n=============================================="

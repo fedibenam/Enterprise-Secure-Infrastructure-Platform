@@ -10,7 +10,9 @@ $script:LayerResults = [ordered]@{
     'Feedback (Observability)'           = $false
     'Alert Routing (Webhook)'            = $false
     'Reaction (Autoscaling/Remediation)' = $false
-    'Distributed Tracing'                = $false  # <-- Add this line
+    'Distributed Tracing'                = $false  
+    'Advanced Networking (Cilium)'       = $false  # <-- ADD THIS LINE
+
 }
 
 function Invoke-Step {
@@ -71,12 +73,14 @@ function Ensure-MinikubeProfile {
     }
 
     $mirrorArg = "--image-repository=registry.aliyuncs.com/google_containers"
+    $cniArg = "--cni=cilium"  # <-- ADD THIS LINE
+
     if ($exists) {
         Write-Host "Profile '$Profile' exists - starting it."
-        minikube start --profile $Profile --driver=docker $mirrorArg
+        minikube start --profile $Profile --driver=docker $mirrorArg $cniArg  # <-- ADD $cniArg
     } else {
         Write-Host "Creating profile '$Profile' with ${Cpus} CPUs / ${MemoryMb} MB..."
-        minikube start --profile $Profile --cpus=$Cpus --memory=$MemoryMb --driver=docker $mirrorArg
+        minikube start --profile $Profile --cpus=$Cpus --memory=$MemoryMb --driver=docker $mirrorArg $cniArg  # <-- ADD $cniArg
     }
 
     if ($LASTEXITCODE -ne 0) { throw "Minikube start failed for profile '$Profile'." }
