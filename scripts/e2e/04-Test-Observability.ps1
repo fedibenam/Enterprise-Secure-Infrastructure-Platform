@@ -7,30 +7,23 @@ $feedbackOk = Invoke-Step -Name 'Feedback pipeline resource test' -Action {
 if ($feedbackOk) { $script:LayerResults['Feedback (Observability)'] = $true }
 
 $webhookOk = Invoke-Step -Name 'Alertmanager Webhook Routing' -Action {
-    # 1. FIX: Upgrade Prometheus stack to enable AlertmanagerConfig selection
+    # 1. FIX: Patch the Alertmanager CR directly to enable AlertmanagerConfig selection
     Write-Host "Configuring Prometheus Operator to select AlertmanagerConfigs..."
     
-    $amValues = @"
-alertmanager:
-  alertmanagerSpec:
-    alertmanagerConfigSelector:
-      matchLabels:
-        role: alert-routing
-    alertmanagerConfigNamespaceSelector: {}
-"@
-    $amValuesFile = Join-Path $env:TEMP 'am-values.yaml'
-    Set-Content -Path $amValuesFile -Value $amValues -Encoding UTF8
-
-    helm upgrade kube-prometheus prometheus-community/kube-prometheus-stack `
-        --namespace observability `
-        --kube-context $context `
-        -f $amValuesFile `
-        --reuse-values 2>$null | Out-Null
+    try {
+        $amCrName = kubectl --context $context -n observability get alertmanager --no-headers -o custom-columns=NAME:.metadata.name 2>$null | Select-Object -First 1
+    } catch { $amCrName = $null }
     
-    # CRITICAL: Force Alertmanager to restart so the operator regenerates the config and loads the AlertmanagerConfig
+    if (-not $amCrName) { throw "Could not find Alertmanager CR in observability namespace." }
+    
+    $patchJson = '{"spec":{"alertmanagerConfigSelector":{"matchLabels":{"role":"alert-routing"}},"alertmanagerConfigNamespaceSelector":{}}}'
+    try {
+        kubectl --context $context -n observability patch alertmanager $amCrName --type merge -p $patchJson 2>$null | Out-Null
+    } catch {}
+    
     Write-Host "Forcing Alertmanager to restart to pick up new configuration..."
     kubectl --context $context -n observability delete pod -l app.kubernetes.io/name=alertmanager --ignore-not-found 2>$null | Out-Null
-    Start-Sleep -Seconds 20 # Wait for pod to terminate and restart
+    Start-Sleep -Seconds 20
 
     # 2. Deploy webhook receiver
     $receiverManifest = @"
@@ -72,7 +65,7 @@ spec:
     kubectl --context $context apply -f $tmpReceiver 2>$null | Out-Null
     Wait-ForDeployment -Context $context -Namespace observability -Name webhook-receiver -TimeoutSeconds 180
 
-    # 3. Create AlertmanagerConfig WITH the correct object syntax for matchers
+        # 3. FIX: Apply matchers directly to the root route to avoid CRD validation bugs
     $amConfig = @"
 apiVersion: monitoring.coreos.com/v1alpha1
 kind: AlertmanagerConfig

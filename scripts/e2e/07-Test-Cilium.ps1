@@ -1,4 +1,4 @@
-# scripts/e2e/07-Test-Cilium.ps1
+# scripts/e2e/08-Test-Cilium.ps1
 
 $ciliumOk = Invoke-Step -Name 'Advanced Networking (Cilium & Hubble)' -Action {
     Write-Host "Verifying Cilium CNI is active..."
@@ -17,18 +17,15 @@ $ciliumOk = Invoke-Step -Name 'Advanced Networking (Cilium & Hubble)' -Action {
         
         try { helm repo add cilium https://helm.cilium.io/ 2>$null | Out-Null } catch {}
         
-        # FIX: Use --wait to ensure Helm waits for the DaemonSet and CRDs to be fully ready
         try {
             helm upgrade --install cilium cilium/cilium `
                 --namespace kube-system `
                 --kube-context $context `
                 --set k8sServiceHost=localhost `
                 --set k8sServicePort=8443 `
-                --set kubeProxyReplacement=true `
                 --wait 2>$null | Out-Null
         } catch {}
             
-        # FIX: Explicitly wait for the Cilium DaemonSet (NOT Deployment) to be ready
         $deadline = (Get-Date).AddSeconds(180)
         $ciliumReady = $false
         while ((Get-Date) -lt $deadline) {
@@ -107,26 +104,10 @@ spec:
     kubectl --context $context apply -f $tmpNginx 2>$null | Out-Null
     Wait-ForDeployment -Context $context -Namespace cilium-test -Name nginx -TimeoutSeconds 120
 
-    Write-Host "Applying Cilium Zero-Trust Identity Policy..."
-    $l4Policy = @"
-apiVersion: cilium.io/v2
-kind: CiliumNetworkPolicy
-metadata:
-  name: zero-trust-deny-all
-  namespace: cilium-test
-spec:
-  endpointSelector:
-    matchLabels:
-      app: nginx
-  ingress:
-  - fromEndpoints:
-    - matchLabels:
-        access: granted
-"@
-    $tmpPolicy = Join-Path $env:TEMP 'cilium-l4-policy.yaml'
-    Set-Content -Path $tmpPolicy -Value $l4Policy -Encoding UTF8
-    kubectl --context $context apply -f $tmpPolicy 2>$null | Out-Null
-    Start-Sleep -Seconds 5
+    # CRITICAL FIX: Restart the nginx deployment so pods are created with the Cilium CNI interface!
+    Write-Host "  Restarting nginx deployment to ensure pods use Cilium CNI..."
+    kubectl --context $context -n cilium-test rollout restart deploy nginx 2>$null | Out-Null
+    Wait-ForDeployment -Context $context -Namespace cilium-test -Name nginx -TimeoutSeconds 120
 
     $curlManifest = @"
 apiVersion: v1
@@ -151,13 +132,42 @@ spec:
         Start-Sleep -Seconds 3
     }
 
+    # Pre-policy connectivity check
+    Write-Host "  Verifying baseline connectivity before applying policy..."
+    try { $preCheck = kubectl --context $context -n cilium-test exec curl-client -- curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://nginx.cilium-test.svc.cluster.local/ 2>$null } catch { $preCheck = '000' }
+    Write-Host "    Pre-policy response: $preCheck (Should be 200)"
+
+    Write-Host "Applying Cilium Zero-Trust Identity Policy..."
+    $l4Policy = @"
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: zero-trust-deny-all
+  namespace: cilium-test
+spec:
+  endpointSelector:
+    matchLabels:
+      app: nginx
+  ingress:
+  - fromEndpoints:
+    - matchLabels:
+        access: granted
+"@
+    $tmpPolicy = Join-Path $env:TEMP 'cilium-l4-policy.yaml'
+    Set-Content -Path $tmpPolicy -Value $l4Policy -Encoding UTF8
+    kubectl --context $context apply -f $tmpPolicy 2>$null | Out-Null
+    
+    Write-Host "Waiting for Cilium eBPF dataplane to enforce the policy..."
+    Start-Sleep -Seconds 15
+
     Write-Host "  Sending request from unauthorized pod (should be dropped)..."
     try { $resp1 = kubectl --context $context -n cilium-test exec curl-client -- curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://nginx.cilium-test.svc.cluster.local/ 2>$null } catch { $resp1 = '000' }
     Write-Host "    Response code: $resp1"
     
     Write-Host "  Granting access label to curl pod..."
     kubectl --context $context -n cilium-test label pod curl-client access=granted --overwrite 2>$null | Out-Null
-    Start-Sleep -Seconds 3
+    Write-Host "  Waiting for Cilium to update security identity..."
+    Start-Sleep -Seconds 15 # Increased wait time for identity update
     
     try { $resp2 = kubectl --context $context -n cilium-test exec curl-client -- curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://nginx.cilium-test.svc.cluster.local/ 2>$null } catch { $resp2 = '000' }
     Write-Host "    Response code: $resp2"
