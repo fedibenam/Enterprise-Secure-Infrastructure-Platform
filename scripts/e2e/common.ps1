@@ -12,7 +12,8 @@ $script:LayerResults = [ordered]@{
     'Reaction (Autoscaling/Remediation)' = $false
     'Distributed Tracing'                = $false  
     'Advanced Networking (Cilium)'       = $false  
-    'Enterprise Visualization'           = $false  # <-- ADD THIS LINE
+    'Enterprise Visualization'           = $false  
+    'Runtime Security (Falco)'           = $false  # ADD THIS LINE
 
 }
 
