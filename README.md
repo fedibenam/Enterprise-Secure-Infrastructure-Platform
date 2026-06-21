@@ -60,3 +60,6 @@ This repository is accepted as valid only when all five layers remain connected 
 The architecture is cloud-portable, but no cloud account is required to run this reference setup locally.
 
 Run `scripts/system-validation.ps1` to assert GitOps role separation, deny-mode enforcement, and reaction-path continuity.
+kubectl --context dev get svc -n observability
+kubectl --context dev get svc -n tracing
+kubectl --context dev get svc -n kube-system | Select-String hubble

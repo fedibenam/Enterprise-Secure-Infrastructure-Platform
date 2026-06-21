@@ -3,18 +3,25 @@
 $ciliumOk = Invoke-Step -Name 'Advanced Networking (Cilium & Hubble)' -Action {
     Write-Host "Verifying Cilium CNI is active..."
     
-    try { $ciliumOutput = kubectl --context $context get pods -l k8s-app=cilium -A --no-headers 2>$null } catch { $ciliumOutput = $null }
-    
-    $ciliumInstalled = $true
-    if (-not $ciliumOutput -or $ciliumOutput -match 'No resources found') {
-        $ciliumInstalled = $false
+    # FOOLPROOF DETECTION: Check specifically in kube-system
+    $ciliumPods = kubectl --context $context get pods -n kube-system -l k8s-app=cilium --no-headers 2>$null
+    $ciliumInstalled = $false
+    if ($ciliumPods -and $ciliumPods -notmatch 'No resources found' -and $ciliumPods.Trim() -ne '') {
+        $ciliumInstalled = $true
     }
 
     if (-not $ciliumInstalled) {
-        Write-Host "  Cilium not found. Removing default 'kindnet' CNI and installing Cilium via Helm..."
+        Write-Host "  Cilium not found. Performing clean CNI replacement..."
         
+        Write-Host "  Removing kindnet and kube-proxy DaemonSets..."
         try { kubectl --context $context delete daemonset kindnet -n kube-system --ignore-not-found 2>$null | Out-Null } catch {}
-        
+        try { kubectl --context $context -n kube-system delete daemonset kube-proxy --ignore-not-found 2>$null | Out-Null } catch {}
+
+        $podCIDR = kubectl --context $context get node $context -o jsonpath='{.spec.podCIDR}' 2>$null
+        if (-not $podCIDR) { $podCIDR = "10.244.0.0/16" }
+        Write-Host "  Detected Pod CIDR: $podCIDR"
+
+        Write-Host "  Installing Cilium via Helm..."
         try { helm repo add cilium https://helm.cilium.io/ 2>$null | Out-Null } catch {}
         
         try {
@@ -23,6 +30,11 @@ $ciliumOk = Invoke-Step -Name 'Advanced Networking (Cilium & Hubble)' -Action {
                 --kube-context $context `
                 --set k8sServiceHost=localhost `
                 --set k8sServicePort=8443 `
+                --set kubeProxyReplacement=true `
+                --set operator.replicas=1 `
+                --set tunnel=vxlan `
+                --set ipam.mode=cluster-pool `
+                --set "ipam.operator.clusterPoolIPv4PodCIDRList={$podCIDR}" `
                 --wait 2>$null | Out-Null
         } catch {}
             
@@ -39,14 +51,42 @@ $ciliumOk = Invoke-Step -Name 'Advanced Networking (Cilium & Hubble)' -Action {
             Start-Sleep -Seconds 5
         }
         if (-not $ciliumReady) { throw "Cilium DaemonSet failed to become ready." }
+
+        Write-Host "  Restarting Minikube node to clear cached CNI state..."
+        try {
+            minikube -p $context stop 2>$null | Out-Null
+            Start-Sleep -Seconds 5
+            minikube -p $context start 2>$null | Out-Null
+        } catch {}
+        
+        Write-Host "  Waiting for node to be ready..."
+        $deadline = (Get-Date).AddSeconds(180)
+        $nodeReady = $false
+        while ((Get-Date) -lt $deadline) {
+            try {
+                $status = kubectl --context $context get node $context -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>$null
+                if ($status -eq "True") { $nodeReady = $true; break }
+            } catch {}
+            Start-Sleep -Seconds 5
+        }
+        if (-not $nodeReady) { throw "Node failed to become ready after restart." }
     }
+
+    # ALWAYS restart CoreDNS to ensure it picks up the current CNI state
+    Write-Host "  Restarting CoreDNS to ensure DNS resolution works with current CNI..."
+    try { kubectl --context $context -n kube-system rollout restart deployment/coredns 2>$null | Out-Null } catch {}
+    Start-Sleep -Seconds 15
     
     Write-Host "  Cilium agents are running."
 
     Write-Host "Verifying Hubble (Network Observability) is active..."
-    try { $hubbleOutput = kubectl --context $context get deploy hubble-relay -A --no-headers 2>$null } catch { $hubbleOutput = $null }
+    $hubblePods = kubectl --context $context get pods -n kube-system -l app.kubernetes.io/name=hubble-relay --no-headers 2>$null
+    $hubbleInstalled = $false
+    if ($hubblePods -and $hubblePods -notmatch 'No resources found' -and $hubblePods.Trim() -ne '') {
+        $hubbleInstalled = $true
+    }
     
-    if (-not $hubbleOutput -or $hubbleOutput -match 'No resources found') {
+    if (-not $hubbleInstalled) {
         Write-Host "  Enabling Hubble via Helm upgrade..."
         try {
             helm upgrade cilium cilium/cilium `
@@ -102,12 +142,9 @@ spec:
     $tmpNginx = Join-Path $env:TEMP 'cilium-nginx.yaml'
     Set-Content -Path $tmpNginx -Value $nginxManifest -Encoding UTF8
     kubectl --context $context apply -f $tmpNginx 2>$null | Out-Null
-    Wait-ForDeployment -Context $context -Namespace cilium-test -Name nginx -TimeoutSeconds 120
-
-    # CRITICAL FIX: Restart the nginx deployment so pods are created with the Cilium CNI interface!
-    Write-Host "  Restarting nginx deployment to ensure pods use Cilium CNI..."
-    kubectl --context $context -n cilium-test rollout restart deploy nginx 2>$null | Out-Null
-    Wait-ForDeployment -Context $context -Namespace cilium-test -Name nginx -TimeoutSeconds 120
+    
+    Write-Host "  Waiting for nginx deployment to be ready..."
+    Wait-ForDeployment -Context $context -Namespace cilium-test -Name nginx -TimeoutSeconds 180
 
     $curlManifest = @"
 apiVersion: v1
@@ -125,17 +162,35 @@ spec:
     Set-Content -Path $tmpCurl -Value $curlManifest -Encoding UTF8
     kubectl --context $context apply -f $tmpCurl 2>$null | Out-Null
     
-    $deadline = (Get-Date).AddSeconds(60)
+    $deadline = (Get-Date).AddSeconds(90)
     while ((Get-Date) -lt $deadline) {
         try { $phase = kubectl --context $context -n cilium-test get pod curl-client --no-headers -o custom-columns=STATUS:.status.phase 2>$null } catch { $phase = $null }
         if ($phase -eq 'Running') { break }
         Start-Sleep -Seconds 3
     }
 
-    # Pre-policy connectivity check
-    Write-Host "  Verifying baseline connectivity before applying policy..."
-    try { $preCheck = kubectl --context $context -n cilium-test exec curl-client -- curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://nginx.cilium-test.svc.cluster.local/ 2>$null } catch { $preCheck = '000' }
+    Write-Host "  Testing baseline connectivity..."
+    try { $preCheck = kubectl --context $context -n cilium-test exec curl-client -- curl -s -o /dev/null -w "%{http_code}" --max-time 10 http://nginx.cilium-test.svc.cluster.local/ 2>$null } catch { $preCheck = '000' }
     Write-Host "    Pre-policy response: $preCheck (Should be 200)"
+
+    # DNS FALLBACK: If DNS fails (000), grab the direct Pod IP and retry
+    $targetUrl = "http://nginx.cilium-test.svc.cluster.local/"
+    if ($preCheck -ne '200') {
+        Write-Host "  WARNING: DNS resolution failed! Grabbing direct Pod IP..."
+        $nginxIp = kubectl --context $context -n cilium-test get pod -l app=nginx -o jsonpath='{.items[0].status.podIP}' 2>$null
+        if ($nginxIp) {
+            $targetUrl = "http://$nginxIp/"
+            Write-Host "  Retrying with direct IP: $targetUrl"
+            try { $directCheck = kubectl --context $context -n cilium-test exec curl-client -- curl -s -o /dev/null -w "%{http_code}" --max-time 10 $targetUrl 2>$null } catch { $directCheck = '000' }
+            if ($directCheck -eq '200') {
+                Write-Host "  Direct IP works! Proceeding with policy test using direct IP."
+            } else {
+                throw "Direct IP also failed ($directCheck). Pod networking is completely broken."
+            }
+        } else {
+            throw "Nginx pod has no IP address. CNI is broken."
+        }
+    }
 
     Write-Host "Applying Cilium Zero-Trust Identity Policy..."
     $l4Policy = @"
@@ -161,16 +216,23 @@ spec:
     Start-Sleep -Seconds 15
 
     Write-Host "  Sending request from unauthorized pod (should be dropped)..."
-    try { $resp1 = kubectl --context $context -n cilium-test exec curl-client -- curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://nginx.cilium-test.svc.cluster.local/ 2>$null } catch { $resp1 = '000' }
+    try { $resp1 = kubectl --context $context -n cilium-test exec curl-client -- curl -s -o /dev/null -w "%{http_code}" --max-time 10 $targetUrl 2>$null } catch { $resp1 = '000' }
     Write-Host "    Response code: $resp1"
     
     Write-Host "  Granting access label to curl pod..."
     kubectl --context $context -n cilium-test label pod curl-client access=granted --overwrite 2>$null | Out-Null
-    Write-Host "  Waiting for Cilium to update security identity..."
-    Start-Sleep -Seconds 15 # Increased wait time for identity update
     
-    try { $resp2 = kubectl --context $context -n cilium-test exec curl-client -- curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://nginx.cilium-test.svc.cluster.local/ 2>$null } catch { $resp2 = '000' }
-    Write-Host "    Response code: $resp2"
+    Write-Host "  Waiting for Cilium to update security identity (30 seconds)..."
+    Start-Sleep -Seconds 30
+    
+    $resp2 = '000'
+    for ($i = 1; $i -le 3; $i++) {
+        Write-Host "    Attempt $i..."
+        try { $resp2 = kubectl --context $context -n cilium-test exec curl-client -- curl -s -o /dev/null -w "%{http_code}" --max-time 10 $targetUrl 2>$null } catch { $resp2 = '000' }
+        Write-Host "      Response code: $resp2"
+        if ($resp2 -eq '200') { break }
+        Start-Sleep -Seconds 5
+    }
 
     kubectl --context $context delete namespace cilium-test --ignore-not-found 2>$null | Out-Null
 

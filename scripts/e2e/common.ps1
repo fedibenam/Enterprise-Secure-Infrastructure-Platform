@@ -11,7 +11,8 @@ $script:LayerResults = [ordered]@{
     'Alert Routing (Webhook)'            = $false
     'Reaction (Autoscaling/Remediation)' = $false
     'Distributed Tracing'                = $false  
-    'Advanced Networking (Cilium)'       = $false  # <-- ADD THIS LINE
+    'Advanced Networking (Cilium)'       = $false  
+    'Enterprise Visualization'           = $false  # <-- ADD THIS LINE
 
 }
 
