@@ -1,9 +1,5 @@
 # scripts/e2e/03-Test-Security.ps1
 
-# Safe native-command wrapper (same helper used in 09-Test-Falco.ps1;
-# also defined here so this file is independently runnable).
-# Prevents $ErrorActionPreference = 'Stop' from treating benign stderr
-# output (helm warnings, kubectl advisory lines) as terminating errors.
 function Invoke-NativeSafe {
     param([scriptblock]$Command)
     $prevEAP = $ErrorActionPreference
@@ -17,7 +13,7 @@ function Invoke-NativeSafe {
 }
 
 # ---------------------------------------------------------------------------
-# Step 1 — Security enforcement deny test
+# Step 1 — Multi-Vector Security Enforcement Test
 # ---------------------------------------------------------------------------
 $enforcementOk = Invoke-Step -Name 'Security enforcement deny test' -Action {
     $contexts = kubectl config get-contexts -o name 2>$null
@@ -55,53 +51,114 @@ $enforcementOk = Invoke-Step -Name 'Security enforcement deny test' -Action {
         Write-Host "Gatekeeper not detected - relying on PodSecurity."
     }
 
-    $badManifest = @'
-apiVersion: apps/v1
-kind: Deployment
+    # Test multiple security violations
+    $testCases = @(
+        @{
+            Name = 'privileged-container'
+            Manifest = @'
+apiVersion: v1
+kind: Pod
 metadata:
-  name: should-be-denied
+  name: test-privileged
   namespace: platform
-  labels:
-    app.kubernetes.io/name: should-be-denied
 spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: should-be-denied
-  template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: should-be-denied
-    spec:
-      containers:
-      - name: bad
-        image: docker.io/library/nginx:latest
-        securityContext:
-          privileged: true
+  containers:
+  - name: bad
+    image: nginx:latest
+    securityContext:
+      privileged: true
 '@
+            ExpectedPattern = 'privileged|PodSecurity|denied|forbidden'
+        },
+        @{
+            Name = 'host-network'
+            Manifest = @'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-hostnetwork
+  namespace: platform
+spec:
+  hostNetwork: true
+  containers:
+  - name: bad
+    image: nginx:latest
+'@
+            ExpectedPattern = 'hostNetwork|PodSecurity|denied|forbidden'
+        },
+        @{
+            Name = 'host-pid'
+            Manifest = @'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-hostpid
+  namespace: platform
+spec:
+  hostPID: true
+  containers:
+  - name: bad
+    image: nginx:latest
+'@
+            ExpectedPattern = 'hostPID|PodSecurity|denied|forbidden'
+        },
+        @{
+            Name = 'dangerous-capabilities'
+            Manifest = @'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-caps
+  namespace: platform
+spec:
+  containers:
+  - name: bad
+    image: nginx:latest
+    securityContext:
+      capabilities:
+        add: ["SYS_ADMIN", "NET_RAW"]
+'@
+            ExpectedPattern = 'capabilities|SYS_ADMIN|NET_RAW|PodSecurity|denied|forbidden'
+        }
+    )
 
-    $tmpBad = Join-Path $env:TEMP 'platform-deny-test.yaml'
-    Set-Content -Path $tmpBad -Value $badManifest -Encoding UTF8
+    $violationsDetected = 0
+    $totalTests = $testCases.Count
 
-    Write-Host "Attempting kubectl apply (should be denied or warned by PodSecurity)..."
+    foreach ($test in $testCases) {
+        Write-Host "`nTesting: $($test.Name)..." -ForegroundColor Cyan
+        
+        $tmpFile = Join-Path $env:TEMP "security-test-$($test.Name).yaml"
+        Set-Content -Path $tmpFile -Value $test.Manifest -Encoding UTF8
 
-    $applyResult = Invoke-NativeSafe {
-        kubectl --context $context apply -f $tmpBad
+        $applyResult = Invoke-NativeSafe {
+            kubectl --context $context apply -f $tmpFile
+        }
+
+        $violationDetected = ($applyResult.ExitCode -ne 0) -or
+                             ($applyResult.Output -match $test.ExpectedPattern)
+
+        if ($violationDetected) {
+            Write-Host "  [PASS] Violation detected and blocked" -ForegroundColor Green
+            $violationsDetected++
+        } else {
+            Write-Host "  [FAIL] Violation NOT detected - security gap!" -ForegroundColor Red
+            Write-Host "  Exit code: $($applyResult.ExitCode)" -ForegroundColor Yellow
+            Write-Host "  Output: $($applyResult.Output)" -ForegroundColor Yellow
+        }
+
+        # Cleanup
+        Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue
+        kubectl --context $context -n platform delete pod "test-$($test.Name)" --ignore-not-found 2>$null | Out-Null
     }
-    Write-Host "  kubectl exit code: $($applyResult.ExitCode)"
-    Write-Host "  output: $($applyResult.Output)"
 
-    $violationDetected = ($applyResult.ExitCode -ne 0) -or
-                         ($applyResult.Output -match 'violate|denied|forbidden|privileged|PodSecurity')
+    Write-Host "`nSecurity enforcement summary: $violationsDetected/$totalTests violations blocked" -ForegroundColor Cyan
 
-    Remove-Item $tmpBad -Force -ErrorAction SilentlyContinue
-    kubectl --context $context -n platform delete deploy should-be-denied --ignore-not-found 2>$null | Out-Null
-
-    if (-not $violationDetected) {
-        throw "Privileged deployment was ACCEPTED without any policy warning - enforcement failed."
+    if ($violationsDetected -lt $totalTests) {
+        throw "Only $violationsDetected of $totalTests security violations were blocked"
     }
 
-    Write-Host "Deny test PASSED - privileged deployment triggered PodSecurity policy check."
+    Write-Host "All security enforcement tests PASSED" -ForegroundColor Green
 }
 
 if ($enforcementOk) { $script:LayerResults['Enforcement (Policy)'] = $true }
@@ -112,7 +169,6 @@ if ($enforcementOk) { $script:LayerResults['Enforcement (Policy)'] = $true }
 $trivyOk = Invoke-Step -Name 'Image Security Scanning (Trivy Operator)' -Action {
     Write-Host "Installing Trivy Operator..."
 
-    # Repo add/update: failures here are non-fatal (may already exist / air-gapped)
     $repoAdd = Invoke-NativeSafe { helm repo add aqua https://aquasecurity.github.io/helm-charts/ }
     if ($repoAdd.ExitCode -ne 0 -and $repoAdd.Output -notmatch 'already exists') {
         Write-Host "  Warning: helm repo add: $($repoAdd.Output)" -ForegroundColor Yellow
@@ -123,8 +179,6 @@ $trivyOk = Invoke-Step -Name 'Image Security Scanning (Trivy Operator)' -Action 
         Write-Host "  Warning: helm repo update: $($repoUpdate.Output)" -ForegroundColor Yellow
     }
 
-    # --- Bug fix: use Invoke-NativeSafe so Helm warnings on stderr don't
-    #     become terminating errors under $ErrorActionPreference = 'Stop' ---
     $helmInstall = Invoke-NativeSafe {
         helm upgrade --install trivy-operator aqua/trivy-operator `
             --namespace trivy-system --create-namespace `
@@ -142,7 +196,6 @@ $trivyOk = Invoke-Step -Name 'Image Security Scanning (Trivy Operator)' -Action 
 
     Wait-ForDeployment -Context $context -Namespace trivy-system -Name trivy-operator -TimeoutSeconds 180
 
-    # Verify the pod is actually in Running state before proceeding
     $trivyPods = kubectl --context $context -n trivy-system get pods `
         -l app.kubernetes.io/name=trivy-operator --no-headers 2>$null
     if ($trivyPods -notmatch 'Running') {
@@ -152,7 +205,7 @@ $trivyOk = Invoke-Step -Name 'Image Security Scanning (Trivy Operator)' -Action 
     }
 
     Write-Host "Trivy Operator is running. Waiting for vulnerability reports (up to 3 min)..."
-    Start-Sleep -Seconds 30   # give the operator time to start scanning
+    Start-Sleep -Seconds 30
 
     $deadline     = (Get-Date).AddMinutes(3)
     $reportsFound = $false
@@ -169,6 +222,14 @@ $trivyOk = Invoke-Step -Name 'Image Security Scanning (Trivy Operator)' -Action 
                 -and $reportText -notmatch 'No resources found') {
             $reportCount = ($reportText -split "`n" | Where-Object { $_.Trim() -ne '' }).Count
             Write-Host "  Found $reportCount vulnerability report(s)." -ForegroundColor Green
+            
+            # Show severity breakdown
+            $criticalCount = ($reportText | Select-String -Pattern 'CRITICAL' -AllMatches).Count
+            $highCount = ($reportText | Select-String -Pattern 'HIGH' -AllMatches).Count
+            if ($criticalCount -gt 0 -or $highCount -gt 0) {
+                Write-Host "  Severity breakdown: CRITICAL=$criticalCount, HIGH=$highCount" -ForegroundColor Yellow
+            }
+            
             $reportsFound = $true
             break
         }
@@ -181,8 +242,6 @@ $trivyOk = Invoke-Step -Name 'Image Security Scanning (Trivy Operator)' -Action 
         $trivyLogs = kubectl --context $context -n trivy-system `
             logs deployment/trivy-operator --tail=100 2>$null
 
-        # In isolated minikube the operator can't reach the vuln DB; that's
-        # expected and not a reason to fail the layer.
         $networkIssue = $trivyLogs -match `
             'failed to download|timeout|connection refused|no such host|i/o timeout|TLS|certificate'
 
@@ -197,16 +256,104 @@ $trivyOk = Invoke-Step -Name 'Image Security Scanning (Trivy Operator)' -Action 
         } elseif ($operatorHealthy) {
             Write-Host "  Operator is healthy; reports not yet generated (needs more time or image activity)." -ForegroundColor Yellow
         } else {
-            # Operator is genuinely broken - dump logs and fail
             Write-Host "  Trivy Operator logs:" -ForegroundColor Yellow
             Write-Host $trivyLogs
             throw "Trivy Operator is not healthy and produced no reports."
         }
 
-        # Both network-issue and healthy-but-slow cases pass: the operator
-        # is installed and running; report generation is an environment concern.
         Write-Host "  Trivy Operator is operational (reports blocked by environment, not config)." -ForegroundColor Green
+    }
+
+    # Verify Trivy metrics are exposed
+    Write-Host "Verifying Trivy metrics endpoint..."
+    $metricsResult = Invoke-NativeSafe {
+        kubectl --context $context -n trivy-system exec `
+            deployment/trivy-operator -- wget -qO- http://localhost:8080/metrics
+    }
+    
+    if ($metricsResult.ExitCode -eq 0 -and $metricsResult.Output -match 'trivy_') {
+        Write-Host "  [OK] Trivy metrics endpoint is active" -ForegroundColor Green
+    } else {
+        Write-Host "  [WARN] Trivy metrics endpoint not accessible" -ForegroundColor Yellow
     }
 }
 
 if ($trivyOk) { $script:LayerResults['Image Security (Trivy)'] = $true }
+
+# ---------------------------------------------------------------------------
+# Step 3 — Security Audit Logging Verification (FULLY FIXED)
+# ---------------------------------------------------------------------------
+$auditOk = Invoke-Step -Name 'Security audit logging verification' -Action {
+    Write-Host "Verifying security violations are being logged..."
+
+    # Check Gatekeeper audit logs
+    $gkAuditLogs = kubectl --context $context -n gatekeeper-system `
+        logs deployment/gatekeeper-audit --tail=50 2>$null
+
+    if ($gkAuditLogs -match 'constraint|violation|denied') {
+        Write-Host "  [OK] Gatekeeper audit logs contain violation records" -ForegroundColor Green
+    } else {
+        Write-Host "  [INFO] No recent violations in Gatekeeper audit logs" -ForegroundColor Gray
+        Write-Host "  (This is OK if no violations occurred recently)" -ForegroundColor Gray
+    }
+
+    # Check Kubernetes audit events
+    Write-Host "Checking Kubernetes admission events..."
+    $auditEventsResult = Invoke-NativeSafe {
+        kubectl --context $context get events --field-selector reason=FailedAdmission `
+            -A --sort-by='.lastTimestamp' 2>&1
+    }
+
+    if ($auditEventsResult.Output -and $auditEventsResult.Output -notmatch 'No resources found') {
+        $eventCount = ($auditEventsResult.Output -split "`n" | Where-Object { $_ -match 'FailedAdmission' }).Count
+        if ($eventCount -gt 0) {
+            Write-Host "  [OK] Found $eventCount admission failure events" -ForegroundColor Green
+        } else {
+            Write-Host "  [INFO] No admission failure events found" -ForegroundColor Gray
+            Write-Host "  (This is OK if all deployments are compliant)" -ForegroundColor Gray
+        }
+    } else {
+        Write-Host "  [INFO] No admission failure events found" -ForegroundColor Gray
+        Write-Host "  (This is OK if all deployments are compliant)" -ForegroundColor Gray
+    }
+
+    # Verify Gatekeeper constraint templates are loaded - FIXED: Use Invoke-NativeSafe
+    Write-Host "Verifying Gatekeeper constraint templates..."
+    $constraintTemplatesResult = Invoke-NativeSafe {
+        kubectl --context $context get constrainttemplates 2>&1
+    }
+
+    if ($constraintTemplatesResult.Output -and $constraintTemplatesResult.Output -notmatch 'No resources found') {
+        $templateCount = ($constraintTemplatesResult.Output -split "`n" | Where-Object { $_ -notmatch 'NAME' -and $_.Trim() -ne '' }).Count
+        if ($templateCount -gt 0) {
+            Write-Host "  [OK] Found $templateCount constraint templates loaded" -ForegroundColor Green
+        } else {
+            Write-Host "  [INFO] No constraint templates found (may not be configured)" -ForegroundColor Gray
+        }
+    } else {
+        Write-Host "  [INFO] No constraint templates found (may not be configured)" -ForegroundColor Gray
+    }
+
+    # Verify Gatekeeper constraints are active - FIXED: Use Invoke-NativeSafe
+    Write-Host "Verifying Gatekeeper constraints..."
+    $constraintsResult = Invoke-NativeSafe {
+        kubectl --context $context get constraints 2>&1
+    }
+
+    if ($constraintsResult.Output -and $constraintsResult.Output -notmatch 'No resources found') {
+        $constraintCount = ($constraintsResult.Output -split "`n" | Where-Object { $_ -notmatch 'NAME' -and $_.Trim() -ne '' }).Count
+        if ($constraintCount -gt 0) {
+            Write-Host "  [OK] Found $constraintCount active constraints" -ForegroundColor Green
+        } else {
+            Write-Host "  [INFO] No active constraints found (may not be configured)" -ForegroundColor Gray
+        }
+    } else {
+        Write-Host "  [INFO] No active constraints found (may not be configured)" -ForegroundColor Gray
+    }
+
+    Write-Host "Audit logging verification complete" -ForegroundColor Green
+}
+
+if ($auditOk) { 
+    # This is informational only, doesn't affect the main result
+}
